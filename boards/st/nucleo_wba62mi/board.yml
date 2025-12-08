@@ -1,0 +1,6 @@
+board:
+  name: nucleo_wba62mi
+  full_name: Nucleo WBA62MI
+  vendor: st
+  socs:
+    - name: stm32wba62xx

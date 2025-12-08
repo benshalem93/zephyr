@@ -1,0 +1,22 @@
+# STM32WBA62MI-NUCLEO board configuration
+
+# Copyright (c) 2025 STMicroelectronics
+# SPDX-License-Identifier: Apache-2.0
+
+if BOARD_NUCLEO_WBA62MI
+
+config BOARD
+	default "nucleo_wba62mi"
+
+if BT
+
+config SPI
+	default y
+
+choice BT_HCI_BUS_TYPE
+	default BT_STM32WBA
+endchoice
+
+endif # BT
+
+endif # BOARD_NUCLEO_WBA62MI

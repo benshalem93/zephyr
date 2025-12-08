@@ -1,0 +1,27 @@
+identifier: nucleo_wba62mi
+name: STM32WBA62MI-NUCLEO
+type: mcu
+arch: arm
+toolchain:
+  - zephyr
+  - gnuarmemb
+  - xtools
+ram: 128
+flash: 1024
+supported:
+  - arduino_gpio
+  - arduino_i2c
+  - arduino_spi
+  - adc
+  - bluetooth
+  - counter
+  - gpio
+  - i2c
+  - nvs
+  - pwm
+  - rtc
+  - spi
+  - uart
+  - usb_device
+  - watchdog
+  - ieee802154
