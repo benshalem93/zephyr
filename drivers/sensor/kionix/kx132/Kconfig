@@ -1,0 +1,59 @@
+# Kionix KX132-1211 3-axis accelerometer driver
+
+# Copyright (c) 2024 STMicroelectronics
+# SPDX-License-Identifier: Apache-2.0
+
+menuconfig KX132
+	bool "KX132-1211 I2C accelerometer sensor driver"
+	default y
+	depends on DT_HAS_KIONIX_KX132_ENABLED
+	select I2C
+	help
+	  Enable driver for Kionix KX132-1211 tri-axis accelerometer.
+
+if KX132
+
+choice KX132_TRIGGER_MODE
+	prompt "Trigger mode"
+	help
+	  Specify the type of triggering to be used by the driver.
+
+config KX132_TRIGGER_NONE
+	bool "No trigger"
+
+config KX132_TRIGGER_GLOBAL_THREAD
+	bool "Use global thread"
+	depends on GPIO
+	depends on $(dt_compat_any_has_prop,$(DT_COMPAT_KIONIX_KX132),irq-gpios)
+	select KX132_TRIGGER
+
+config KX132_TRIGGER_OWN_THREAD
+	bool "Use own thread"
+	depends on GPIO
+	depends on $(dt_compat_any_has_prop,$(DT_COMPAT_KIONIX_KX132),irq-gpios)
+	select KX132_TRIGGER
+
+endchoice
+
+config KX132_TRIGGER
+	bool
+
+if KX132_TRIGGER
+
+config KX132_THREAD_PRIORITY
+	int "Thread priority"
+	depends on KX132_TRIGGER_OWN_THREAD
+	default 10
+	help
+	  Priority of thread used by the driver to handle interrupts.
+
+config KX132_THREAD_STACK_SIZE
+	int "Thread stack size"
+	depends on KX132_TRIGGER_OWN_THREAD
+	default 1024
+	help
+	  Stack size of thread used by the driver to handle interrupts.
+
+endif # KX132_TRIGGER
+
+endif # KX132

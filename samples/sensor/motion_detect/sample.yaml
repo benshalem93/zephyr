@@ -1,0 +1,20 @@
+sample:
+  name: Motion detection sample
+common:
+  tags: sensors
+  harness: console
+  harness_config:
+    type: one_line
+    regex:
+      - "Motion detected"
+tests:
+  sample.sensor.motion_detect:
+    filter: dt_alias_exists("accel0")
+    harness_config:
+      type: one_line
+      regex:
+        - "Motion detected"
+    platform_allow:
+      - nucleo_u5a5zj_q
+    integration_platforms:
+      - nucleo_u5a5zj_q

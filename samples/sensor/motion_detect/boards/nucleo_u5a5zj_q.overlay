@@ -1,0 +1,23 @@
+/*
+ * Copyright (c) 2024 STMicroelectronics
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/ {
+	aliases {
+		accel0 = &kx132;
+	};
+};
+
+&i2c1 {
+	kx132: kx132@1f {
+		compatible = "kionix,kx132";
+		reg = <0x1f>;
+		irq-gpios = <&gpiod 14 GPIO_ACTIVE_HIGH>;
+		odr = <0>;
+		range = <2>;
+		wakeup-threshold = <256>;
+		wakeup-debounce = <100>;
+	};
+};
