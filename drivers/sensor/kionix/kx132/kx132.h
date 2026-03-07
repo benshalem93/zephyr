@@ -98,6 +98,35 @@
 #define KX132_ODCNTL_FSTUP	BIT(5)
 #define KX132_ODCNTL_OSA_MASK	0x0F
 
+/* Advanced Data Path Control Registers */
+#define KX132_REG_ADP_CNTL1	0x64
+#define KX132_REG_ADP_CNTL2	0x65
+
+/* ADP_CNTL1 bits */
+#define KX132_ADP_CNTL1_RMS_AVC_MASK	(BIT(6) | BIT(5) | BIT(4))
+#define KX132_ADP_CNTL1_RMS_AVC_SHIFT	4
+#define KX132_ADP_CNTL1_OADP_MASK	0x0F
+
+/* RMS_AVC values: number of samples averaged for RMS output */
+#define KX132_RMS_AVC_2		0x00
+#define KX132_RMS_AVC_4		0x01
+#define KX132_RMS_AVC_8		0x02
+#define KX132_RMS_AVC_16	0x03
+#define KX132_RMS_AVC_32	0x04
+#define KX132_RMS_AVC_64	0x05
+#define KX132_RMS_AVC_128	0x06
+#define KX132_RMS_AVC_256	0x07
+
+/* ADP_CNTL2 bits (TRM p.46) */
+#define KX132_ADP_CNTL2_ADP_BUF_SEL	BIT(7) /* Route ADP to sample buffer */
+#define KX132_ADP_CNTL2_ADP_WB_ISEL	BIT(6) /* ADP data to WUF/BTS engines */
+#define KX132_ADP_CNTL2_RMS_WB_OSEL	BIT(5) /* RMS (not filtered) to WUF/BTS */
+#define KX132_ADP_CNTL2_ADP_FLT2_BYP	BIT(4) /* Bypass filter-2 */
+#define KX132_ADP_CNTL2_ADP_FLT1_BYP	BIT(3) /* Bypass filter-1 */
+/* Bit 2: reserved */
+#define KX132_ADP_CNTL2_ADP_RMS_OSEL	BIT(1) /* RMS to XADP/YADP/ZADP regs; required if RMS_WB_OSEL=1 */
+#define KX132_ADP_CNTL2_ADP_F2_HP	BIT(0) /* Filter-2 as high-pass */
+
 /* INC1 bits */
 #define KX132_INC1_PW1_MASK	(BIT(7) | BIT(6))
 #define KX132_INC1_IEN1	BIT(5)
@@ -181,6 +210,8 @@ struct kx132_data {
 	uint8_t cntl1_val;
 
 #ifdef CONFIG_KX132_TRIGGER
+	uint8_t rms_avc;
+
 	const struct device *dev;
 	struct gpio_callback gpio_cb;
 
@@ -200,6 +231,8 @@ struct kx132_data {
 };
 
 #ifdef CONFIG_KX132_TRIGGER
+int kx132_set_standby(const struct device *dev, bool standby);
+
 int kx132_trigger_set(const struct device *dev,
 		      const struct sensor_trigger *trig,
 		      sensor_trigger_handler_t handler);

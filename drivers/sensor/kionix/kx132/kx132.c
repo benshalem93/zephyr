@@ -105,7 +105,7 @@ static uint8_t kx132_odr_to_owuf(uint16_t odr)
 	return KX132_OWUF_0_781HZ;
 }
 
-static int kx132_set_standby(const struct device *dev, bool standby)
+int kx132_set_standby(const struct device *dev, bool standby)
 {
 	const struct kx132_config *cfg = dev->config;
 	uint8_t val;
@@ -204,6 +204,7 @@ static int kx132_attr_set(const struct device *dev,
 
 	/* OTF (on-the-fly) attributes — no standby required */
 	switch (attr) {
+#ifdef CONFIG_KX132_TRIGGER
 	case SENSOR_ATTR_SLOPE_TH: {
 		/* Convert mg to counts: counts = mg * 256 / 1000 */
 		uint16_t counts = (uint16_t)(val->val1 * 256 / 1000);
@@ -225,6 +226,7 @@ static int kx132_attr_set(const struct device *dev,
 		return i2c_reg_update_byte_dt(&cfg->i2c, KX132_REG_CNTL3,
 					      KX132_CNTL3_OWUF_MASK, owuf);
 	}
+#endif /* CONFIG_KX132_TRIGGER */
 	default:
 		break;
 	}
@@ -258,8 +260,58 @@ static int kx132_attr_set(const struct device *dev,
 
 		ret = i2c_reg_update_byte_dt(&cfg->i2c, KX132_REG_ODCNTL,
 					     KX132_ODCNTL_OSA_MASK, osa);
+		if (ret < 0) {
+			break;
+		}
+#ifdef CONFIG_KX132_TRIGGER
+		/* Keep OWUF and OADP in sync so the WUF debounce counter and
+		 * ADP pipeline run at the new ODR.
+		 */
+		uint8_t owuf = MIN(osa, KX132_OWUF_100HZ);
+
+		ret = i2c_reg_update_byte_dt(&cfg->i2c, KX132_REG_CNTL3,
+					     KX132_CNTL3_OWUF_MASK, owuf);
+		if (ret < 0) {
+			break;
+		}
+		ret = i2c_reg_update_byte_dt(&cfg->i2c, KX132_REG_ADP_CNTL1,
+					     KX132_ADP_CNTL1_OADP_MASK, osa);
+#endif
 		break;
 	}
+#ifdef CONFIG_KX132_TRIGGER
+	case SENSOR_ATTR_OVERSAMPLING: {
+		/* val->val1 is the number of samples the ADP RMS block averages
+		 * per window (RMS_AVC). More samples = longer window = better
+		 * rejection of brief transients. Valid values: 2/4/8/16/32/64/128/256.
+		 */
+		uint8_t avc;
+		uint32_t count = (uint32_t)val->val1;
+
+		if (count >= 256) {
+			avc = KX132_RMS_AVC_256;
+		} else if (count >= 128) {
+			avc = KX132_RMS_AVC_128;
+		} else if (count >= 64) {
+			avc = KX132_RMS_AVC_64;
+		} else if (count >= 32) {
+			avc = KX132_RMS_AVC_32;
+		} else if (count >= 16) {
+			avc = KX132_RMS_AVC_16;
+		} else if (count >= 8) {
+			avc = KX132_RMS_AVC_8;
+		} else if (count >= 4) {
+			avc = KX132_RMS_AVC_4;
+		} else {
+			avc = KX132_RMS_AVC_2;
+		}
+		data->rms_avc = avc;
+		ret = i2c_reg_update_byte_dt(&cfg->i2c, KX132_REG_ADP_CNTL1,
+					     KX132_ADP_CNTL1_RMS_AVC_MASK,
+					     avc << KX132_ADP_CNTL1_RMS_AVC_SHIFT);
+		break;
+	}
+#endif
 	default:
 		ret = -ENOTSUP;
 	}
@@ -296,6 +348,8 @@ static int kx132_power_up(const struct device *dev)
 	data->gain = kx132_range_to_gain(cfg->range);
 
 #ifdef CONFIG_KX132_TRIGGER
+	data->rms_avc = KX132_RMS_AVC_4;
+
 	ret = kx132_init_interrupt(dev);
 	if (ret < 0) {
 		LOG_ERR("Failed to init interrupts: %d", ret);
@@ -311,15 +365,6 @@ static int kx132_power_up(const struct device *dev)
 	if (ret < 0) {
 		return ret;
 	}
-
-#ifdef CONFIG_KX132_TRIGGER
-	/* Force initial sleep state for wake-up engine */
-	ret = i2c_reg_write_byte_dt(&cfg->i2c, KX132_REG_CNTL5,
-				    KX132_CNTL5_MAN_SLEEP);
-	if (ret < 0) {
-		return ret;
-	}
-#endif
 
 	/* Clear any pending interrupts */
 	ret = i2c_reg_read_byte_dt(&cfg->i2c, KX132_REG_INT_REL, &val);
