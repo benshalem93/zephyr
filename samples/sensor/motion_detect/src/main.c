@@ -108,9 +108,10 @@ int main(void)
 
 		sensor_channel_get(dev, SENSOR_CHAN_ACCEL_XYZ, data);
 
-		printf("Motion! [m/s^2] X=%8.4f  Y=%8.4f  Z=%8.4f\n",
+		printf("Motion Detected: X=%8.4f  Y=%8.4f  Z=%8.4f\n",
 		       sensor_value_to_double(&data[0]),
 		       sensor_value_to_double(&data[1]),
 		       sensor_value_to_double(&data[2]));
+		k_msleep(500);
 	}
 }

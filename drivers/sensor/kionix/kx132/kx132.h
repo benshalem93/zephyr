@@ -98,6 +98,24 @@
 #define KX132_ODCNTL_FSTUP	BIT(5)
 #define KX132_ODCNTL_OSA_MASK	0x0F
 
+/* Low-Power Averaging Control (LP_CNTL1, address 0x3A per TRM section 1.19)
+ * AVC<2:0> controls how many internal sub-samples are averaged before the
+ * result is passed to the digital engines (WUF, ADP) and the output registers.
+ * Reset default: 0x43 → AVC=100 = 16 samples.
+ * Requires standby (PC1=0) to change.
+ */
+#define KX132_REG_LP_CNTL1		0x3A
+#define KX132_LP_CNTL1_AVC_MASK	(BIT(6) | BIT(5) | BIT(4))
+#define KX132_LP_CNTL1_AVC_SHIFT	4
+#define KX132_LP_AVC_NO_AVG	0x00 /* no averaging (IIR_BYPASS must be 0) */
+#define KX132_LP_AVC_2		0x01
+#define KX132_LP_AVC_4		0x02
+#define KX132_LP_AVC_8		0x03
+#define KX132_LP_AVC_16		0x04 /* reset default */
+#define KX132_LP_AVC_32		0x05
+#define KX132_LP_AVC_64		0x06
+#define KX132_LP_AVC_128	0x07
+
 /* Advanced Data Path Control Registers */
 #define KX132_REG_ADP_CNTL1	0x64
 #define KX132_REG_ADP_CNTL2	0x65
