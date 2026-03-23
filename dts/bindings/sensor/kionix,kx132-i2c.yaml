@@ -15,9 +15,9 @@ properties:
       INT1 interrupt GPIO pin. This pin signals motion wake-up
       and data-ready events.
 
-  odr:
+  sample-rate:
     type: int
-    default: 50
+    required: true
     enum:
       - 0    # 0.781 Hz
       - 1    # 1.563 Hz
@@ -32,11 +32,13 @@ properties:
       - 800
       - 1600
     description: |
-      Accelerometer output data rate in Hz.
+      Accelerometer output data rate in Hz. Only the listed values are
+      supported by the hardware. The OWUF debounce clock is derived from
+      this rate (clamped to 100 Hz max).
 
   range:
     type: int
-    default: 2
+    required: true
     enum:
       - 2
       - 4
@@ -47,16 +49,14 @@ properties:
 
   wakeup-threshold:
     type: int
-    default: 112
+    default: 450
     description: |
-      Wake-up detection threshold in counts.
-      1 count equals approximately 3.9 mg at 2g range.
-      Valid range is 0-2047 (11 bits).
+      Wake-up detection threshold in milli-g (1 mg = g/1000 = 9.80665e-3 m/s²).
+      The driver converts this value to 11-bit WUFTH counts internally.
 
   wakeup-debounce:
     type: int
-    default: 10
+    default: 640
     description: |
-      Wake-up debounce counter value (WUFC register).
-      Number of consecutive samples that must exceed the
-      threshold before a wake-up interrupt is generated.
+      Wake-up debounce window in milliseconds.
+      The driver converts this to WUFC counts using the active OWUF and ODR.

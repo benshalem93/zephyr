@@ -35,14 +35,14 @@ int main(void)
 	}
 
 	/*
-	 * Arm the WUF + ADP engine.  trigger_set writes to the sensor:
-	 *   - INC2:      all-axis wake-up enabled
-	 *   - CNTL4:     WUFE=1 (WUF on), TH_MODE=1 (relative / delta-RMS mode)
-	 *   - ADP_CNTL1: OADP = same ODR as main accel; RMS_AVC from attr above
-	 *   - ADP_CNTL2: both filters bypassed (raw → RMS), RMS routed to WUF
-	 *   - WUFTH:     wakeup-threshold from devicetree (see overlay)
-	 *   - WUFC:      wakeup-debounce  from devicetree (see overlay)
-	 *   - CNTL5:     ADPE=1 (enable ADP), MAN_SLEEP=1 (arm WUF state machine)
+	 * Arm the WUF engine.  trigger_set writes to the sensor:
+	 *   - CNTL4:  C_MODE=1, TH_MODE=1, WUFE=1, PR_MODE=1
+	 *   - WUFTH:  wakeup-threshold from devicetree (see overlay)
+	 *   - WUFC:   wakeup-debounce  from devicetree (see overlay)
+	 *   - CNTL5:  MAN_SLEEP=1 (arm WUF state machine)
+	 *
+	 * ADP is disabled — raw accelerometer output feeds the WUF engine
+	 * directly (no filters, no RMS path).
 	 */
 	struct sensor_trigger trig = {
 		.type = SENSOR_TRIG_MOTION,
@@ -55,50 +55,36 @@ int main(void)
 	}
 
 	/*
-	 * SENSOR_ATTR_SLOPE_TH — wake-up threshold (overrides devicetree value)
+	 * SENSOR_ATTR_SLOPE_TH — wake-up threshold in milli-g
+	 *   (1 mg = g/1000 = 9.80665e-3 m/s²)
 	 *
-	 * In TH_MODE=1 (relative), the WUF engine computes:
-	 *   |RMS_new - RMS_old| > WUFTH  →  wake
+	 * The driver converts to 11-bit WUFTH counts: counts = mg * 256 / 1000
+	 * (1 count ≈ 3.9 mg, fixed and range-independent).
 	 *
-	 * The register stores counts in the accelerometer's native scale.
-	 * attr_set converts: counts = val.val1 [mg] * 256 / 1000.
-	 *
-	 * At 2 g range, full-scale = 2000 mg = 32768 counts, so 1 count ≈ 0.06 mg.
-	 *
-	 * 50 mg  → 12 counts  → very sensitive, catches a breath on the desk
-	 * 100 mg → 25 counts  → light tap on the table         ← chosen
-	 * 500 mg → 128 counts → strong knock or deliberate shake
-	 *
-	 * Setting 100 mg here: a very gentle tap on the PCB will wake the MCU,
-	 * but normal office background vibration will not.
+	 * 100 mg →  25 counts — light tap
+	 * 500 mg → 128 counts — strong knock or deliberate shake  ← chosen
 	 */
-	val.val1 = 100; /* mg */
+	val.val1 = 500; /* mg */
 	val.val2 = 0;
 	sensor_attr_set(dev, SENSOR_CHAN_ACCEL_XYZ, SENSOR_ATTR_SLOPE_TH, &val);
 
 	/*
-	 * SENSOR_ATTR_SLOPE_DUR — debounce counter (WUFC register)
+	 * SENSOR_ATTR_SLOPE_DUR — debounce window in milliseconds
 	 *
-	 * The WUF engine requires the threshold to be exceeded for WUFC
-	 * consecutive RMS windows before firing the interrupt.
+	 * The WUF engine requires the threshold to be exceeded continuously
+	 * for this duration before firing the interrupt.  The driver converts
+	 * to WUFC counts using the active OWUF ODR (1.563 Hz → 1 count ≈ 640 ms).
 	 *
-	 * WUFC=1: fire on the first window that exceeds threshold.
-	 *         Best for brief events (a single tap ≈ 1–2 windows long).
-	 * WUFC=3: require 3 consecutive windows → 3 × 333 ms ≈ 1 s of motion.
-	 *         Good for filtering out single vibration spikes.
-	 *
-	 * For small motion detection we use WUFC=1: we do not want a short
-	 * tap to go undetected just because it didn't last long enough.
+	 * 3000 ms → 4 counts at 1.563 Hz ≈ 2.56 s of sustained motion required.
 	 */
-	val.val1 = 1;
+	val.val1 = 3000; /* ms */
 	val.val2 = 0;
 	sensor_attr_set(dev, SENSOR_CHAN_ACCEL_XYZ, SENSOR_ATTR_SLOPE_DUR, &val);
 
 	printf("Waiting for motion...\n");
-	printf("  ODR       = 12 Hz  (accel sampling rate)\n");
-	printf("  RMS window= 4 smp  (WUF checks every ~333 ms)\n");
-	printf("  Threshold = 100 mg (delta-RMS to wake)\n");
-	printf("  Debounce  = 1 win  (single window sufficient)\n\n");
+	printf("  Sample rate = 1.5 Hz  (accel sampling rate)\n");
+	printf("  Threshold = 500 mg  (raw accel delta to wake)\n");
+	printf("  Debounce  = 3000 ms (sustained motion required)\n\n");
 
 	while (1) {
 		/* CPU sleeps here (tickless WFI). Wakes only when KX132 pulls

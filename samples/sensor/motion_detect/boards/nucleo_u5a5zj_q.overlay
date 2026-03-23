@@ -15,9 +15,9 @@
 		compatible = "kionix,kx132";
 		reg = <0x1f>;
 		irq-gpios = <&gpiod 14 GPIO_ACTIVE_HIGH>;
-		odr = <12>;
+		sample-rate = <1>;
 		range = <2>;
-		wakeup-threshold = <30>;
-		wakeup-debounce = <1>;
+		wakeup-threshold = <500>;
+		wakeup-debounce = <3000>;
 	};
 };

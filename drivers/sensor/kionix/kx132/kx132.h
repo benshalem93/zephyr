@@ -69,8 +69,10 @@
 #define KX132_CNTL2_SRST	BIT(7)
 #define KX132_CNTL2_COTC	BIT(6)
 
-/* CNTL3 bits - OWUF field */
+/* CNTL3 bits - OWUF field and OBTS field (same ODR encoding) */
 #define KX132_CNTL3_OWUF_MASK	(BIT(2) | BIT(1) | BIT(0))
+#define KX132_CNTL3_OBTS_MASK	(BIT(5) | BIT(4) | BIT(3))
+#define KX132_CNTL3_OBTS_SHIFT	3
 #define KX132_OWUF_0_781HZ	0x00
 #define KX132_OWUF_1_563HZ	0x01
 #define KX132_OWUF_3_125HZ	0x02
@@ -79,6 +81,15 @@
 #define KX132_OWUF_25HZ	0x05
 #define KX132_OWUF_50HZ	0x06
 #define KX132_OWUF_100HZ	0x07
+/* OBTS uses the same encoding as OWUF */
+#define KX132_OBTS_0_781HZ	0x00
+#define KX132_OBTS_1_563HZ	0x01
+#define KX132_OBTS_3_125HZ	0x02
+#define KX132_OBTS_6_25HZ	0x03
+#define KX132_OBTS_12_5HZ	0x04
+#define KX132_OBTS_25HZ		0x05
+#define KX132_OBTS_50HZ		0x06
+#define KX132_OBTS_100HZ	0x07
 
 /* CNTL4 bits */
 #define KX132_CNTL4_C_MODE	BIT(7)
@@ -115,6 +126,12 @@
 #define KX132_LP_AVC_32		0x05
 #define KX132_LP_AVC_64		0x06
 #define KX132_LP_AVC_128	0x07
+
+/* LP_CNTL2 (address 0x3B)
+ * LPSTPSEL=1: stop accumulation during wake-up engine evaluation window.
+ */
+#define KX132_REG_LP_CNTL2		0x3B
+#define KX132_LP_CNTL2_LPSTPSEL	BIT(1)
 
 /* Advanced Data Path Control Registers */
 #define KX132_REG_ADP_CNTL1	0x64
@@ -213,12 +230,12 @@
 
 struct kx132_config {
 	struct i2c_dt_spec i2c;
-	uint16_t odr;
+	uint16_t sample_rate;
 	uint8_t range;
 #ifdef CONFIG_KX132_TRIGGER
 	struct gpio_dt_spec gpio_int;
-	uint16_t wakeup_threshold;
-	uint8_t wakeup_debounce;
+	uint16_t wakeup_threshold_mg;  /* wake-up threshold in milligrams */
+	uint16_t wakeup_debounce_ms;   /* wake-up debounce window in milliseconds */
 #endif
 };
 
@@ -226,10 +243,9 @@ struct kx132_data {
 	int16_t acc[3];
 	uint16_t gain;
 	uint8_t cntl1_val;
+	uint32_t owuf_mhz; /* active OWUF ODR in milli-Hz, for WUFC ms→counts */
 
 #ifdef CONFIG_KX132_TRIGGER
-	uint8_t rms_avc;
-
 	const struct device *dev;
 	struct gpio_callback gpio_cb;
 
@@ -248,8 +264,13 @@ struct kx132_data {
 #endif /* CONFIG_KX132_TRIGGER */
 };
 
-#ifdef CONFIG_KX132_TRIGGER
 int kx132_set_standby(const struct device *dev, bool standby);
+int kx132_soft_reset(const struct device *dev);
+
+int kx132_set_wufth(const struct device *dev, uint16_t mg);
+int kx132_set_wufc(const struct device *dev, uint16_t ms);
+
+#ifdef CONFIG_KX132_TRIGGER
 
 int kx132_trigger_set(const struct device *dev,
 		      const struct sensor_trigger *trig,

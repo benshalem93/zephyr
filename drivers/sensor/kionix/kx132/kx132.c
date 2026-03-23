@@ -15,6 +15,16 @@
 
 LOG_MODULE_REGISTER(kx132, CONFIG_SENSOR_LOG_LEVEL);
 
+static uint8_t kx132_gain_to_range(uint16_t gain)
+{
+	switch (gain) {
+	case KX132_GAIN_4G:  return 4;
+	case KX132_GAIN_8G:  return 8;
+	case KX132_GAIN_16G: return 16;
+	default:             return 2;
+	}
+}
+
 static uint16_t kx132_range_to_gain(uint8_t range)
 {
 	switch (range) {
@@ -84,6 +94,15 @@ static uint8_t kx132_odr_to_osa(uint16_t odr)
 	return KX132_OSA_0_781HZ;
 }
 
+static uint32_t kx132_owuf_to_mhz(uint8_t owuf)
+{
+	static const uint32_t table[] = {
+		781, 1563, 3125, 6250, 12500, 25000, 50000, 100000
+	};
+
+	return table[owuf & 0x07];
+}
+
 static uint8_t kx132_odr_to_owuf(uint16_t odr)
 {
 	if (odr >= 100) {
@@ -124,6 +143,67 @@ int kx132_set_standby(const struct device *dev, bool standby)
 
 	return i2c_reg_write_byte_dt(&cfg->i2c, KX132_REG_CNTL1, val);
 }
+
+int kx132_soft_reset(const struct device *dev)
+{
+	const struct kx132_config *cfg = dev->config;
+	int ret;
+
+	ret = i2c_reg_write_byte_dt(&cfg->i2c, KX132_REG_CNTL2, KX132_CNTL2_SRST);
+	if (ret < 0) {
+		return ret;
+	}
+	k_msleep(2);
+	return 0;
+}
+
+#ifdef CONFIG_KX132_TRIGGER
+int kx132_set_wufth(const struct device *dev, uint16_t mg)
+{
+	const struct kx132_config *cfg = dev->config;
+	struct kx132_data *data = dev->data;
+	uint8_t range = kx132_gain_to_range(data->gain);
+	uint16_t max_mg = (uint16_t)range * 1000U;
+	int ret;
+
+	if (mg > max_mg) {
+		LOG_ERR("Threshold %u mg exceeds configured range +/-%u g (%u mg max)",
+			mg, range, max_mg);
+		return -EINVAL;
+	}
+
+	/* 1 count = range_g * 1000 / 512 mg */
+	uint16_t counts = (uint16_t)((uint32_t)mg * 512 /
+				     ((uint32_t)range * 1000));
+
+	ret = i2c_reg_write_byte_dt(&cfg->i2c, KX132_REG_WUFTH, counts & 0xFF);
+	if (ret < 0) {
+		LOG_ERR("Failed to write WUFTH: %d", ret);
+		return ret;
+	}
+
+	ret = i2c_reg_update_byte_dt(&cfg->i2c, KX132_REG_BTSWUFTH,
+				     0x07, (counts >> 8) & 0x07);
+	if (ret < 0) {
+		LOG_ERR("Failed to write BTSWUFTH: %d", ret);
+	}
+	return ret;
+}
+
+int kx132_set_wufc(const struct device *dev, uint16_t ms)
+{
+	const struct kx132_config *cfg = dev->config;
+	struct kx132_data *data = dev->data;
+	uint8_t counts = (uint8_t)((uint32_t)ms * data->owuf_mhz / 1000000UL);
+	int ret;
+
+	ret = i2c_reg_write_byte_dt(&cfg->i2c, KX132_REG_WUFC, counts);
+	if (ret < 0) {
+		LOG_ERR("Failed to write WUFC: %d", ret);
+	}
+	return ret;
+}
+#endif /* CONFIG_KX132_TRIGGER */
 
 static int kx132_sample_fetch(const struct device *dev,
 			      enum sensor_channel chan)
@@ -202,29 +282,32 @@ static int kx132_attr_set(const struct device *dev,
 	struct kx132_data *data = dev->data;
 	int ret;
 
+	/* KX132 is accel-only */
+	if (chan != SENSOR_CHAN_ACCEL_XYZ &&
+	    chan != SENSOR_CHAN_ACCEL_X   &&
+	    chan != SENSOR_CHAN_ACCEL_Y   &&
+	    chan != SENSOR_CHAN_ACCEL_Z) {
+		return -ENOTSUP;
+	}
+
 	/* OTF (on-the-fly) attributes — no standby required */
 	switch (attr) {
 #ifdef CONFIG_KX132_TRIGGER
-	case SENSOR_ATTR_SLOPE_TH: {
-		/* Convert mg to counts: counts = mg * 256 / 1000 */
-		uint16_t counts = (uint16_t)(val->val1 * 256 / 1000);
-
-		ret = i2c_reg_write_byte_dt(&cfg->i2c, KX132_REG_WUFTH,
-					    counts & 0xFF);
-		if (ret < 0) {
-			return ret;
-		}
-		return i2c_reg_update_byte_dt(&cfg->i2c, KX132_REG_BTSWUFTH,
-					      0x07, (counts >> 8) & 0x07);
-	}
+	case SENSOR_ATTR_SLOPE_TH:
+		/* val->val1 in milli-g (1 mg = g/1000 = 9.80665e-3 m/s²) */
+		return kx132_set_wufth(dev, (uint16_t)val->val1);
 	case SENSOR_ATTR_SLOPE_DUR:
-		return i2c_reg_write_byte_dt(&cfg->i2c, KX132_REG_WUFC,
-					     (uint8_t)val->val1);
+		/* val->val1 in milliseconds */
+		return kx132_set_wufc(dev, (uint16_t)val->val1);
 	case SENSOR_ATTR_HYSTERESIS: {
 		uint8_t owuf = kx132_odr_to_owuf((uint16_t)val->val1);
 
-		return i2c_reg_update_byte_dt(&cfg->i2c, KX132_REG_CNTL3,
-					      KX132_CNTL3_OWUF_MASK, owuf);
+		ret = i2c_reg_update_byte_dt(&cfg->i2c, KX132_REG_CNTL3,
+					     KX132_CNTL3_OWUF_MASK, owuf);
+		if (ret == 0) {
+			data->owuf_mhz = kx132_owuf_to_mhz(owuf);
+		}
+		return ret;
 	}
 #endif /* CONFIG_KX132_TRIGGER */
 	default:
@@ -264,54 +347,17 @@ static int kx132_attr_set(const struct device *dev,
 			break;
 		}
 #ifdef CONFIG_KX132_TRIGGER
-		/* Keep OWUF and OADP in sync so the WUF debounce counter and
-		 * ADP pipeline run at the new ODR.
-		 */
+		/* Keep OWUF in sync with the new ODR */
 		uint8_t owuf = MIN(osa, KX132_OWUF_100HZ);
 
 		ret = i2c_reg_update_byte_dt(&cfg->i2c, KX132_REG_CNTL3,
 					     KX132_CNTL3_OWUF_MASK, owuf);
-		if (ret < 0) {
-			break;
+		if (ret == 0) {
+			data->owuf_mhz = kx132_owuf_to_mhz(owuf);
 		}
-		ret = i2c_reg_update_byte_dt(&cfg->i2c, KX132_REG_ADP_CNTL1,
-					     KX132_ADP_CNTL1_OADP_MASK, osa);
 #endif
 		break;
 	}
-#ifdef CONFIG_KX132_TRIGGER
-	case SENSOR_ATTR_OVERSAMPLING: {
-		/* val->val1 is the number of samples the ADP RMS block averages
-		 * per window (RMS_AVC). More samples = longer window = better
-		 * rejection of brief transients. Valid values: 2/4/8/16/32/64/128/256.
-		 */
-		uint8_t avc;
-		uint32_t count = (uint32_t)val->val1;
-
-		if (count >= 256) {
-			avc = KX132_RMS_AVC_256;
-		} else if (count >= 128) {
-			avc = KX132_RMS_AVC_128;
-		} else if (count >= 64) {
-			avc = KX132_RMS_AVC_64;
-		} else if (count >= 32) {
-			avc = KX132_RMS_AVC_32;
-		} else if (count >= 16) {
-			avc = KX132_RMS_AVC_16;
-		} else if (count >= 8) {
-			avc = KX132_RMS_AVC_8;
-		} else if (count >= 4) {
-			avc = KX132_RMS_AVC_4;
-		} else {
-			avc = KX132_RMS_AVC_2;
-		}
-		data->rms_avc = avc;
-		ret = i2c_reg_update_byte_dt(&cfg->i2c, KX132_REG_ADP_CNTL1,
-					     KX132_ADP_CNTL1_RMS_AVC_MASK,
-					     avc << KX132_ADP_CNTL1_RMS_AVC_SHIFT);
-		break;
-	}
-#endif
 	default:
 		ret = -ENOTSUP;
 	}
@@ -330,16 +376,55 @@ static int kx132_power_up(const struct device *dev)
 	uint8_t val;
 	int ret;
 
-	/* Set standby mode (PC1=0) - required before configuration */
+	/* Enter standby (PC1=0) — required before writing config registers */
 	ret = i2c_reg_write_byte_dt(&cfg->i2c, KX132_REG_CNTL1, 0x00);
 	if (ret < 0) {
 		return ret;
 	}
 
-	/* Configure ODR */
-	uint8_t osa = kx132_odr_to_osa(cfg->odr);
+	/* ODR + IIR bypass */
+	uint8_t osa = kx132_odr_to_osa(cfg->sample_rate);
 
-	ret = i2c_reg_write_byte_dt(&cfg->i2c, KX132_REG_ODCNTL, osa);
+	ret = i2c_reg_write_byte_dt(&cfg->i2c, KX132_REG_ODCNTL,
+				    KX132_ODCNTL_IIR_BYPASS | osa);
+	if (ret < 0) {
+		return ret;
+	}
+
+	/* CNTL3: OWUF and OBTS track the sample rate, clamped to 100 Hz max */
+	uint8_t owuf = MIN(osa, KX132_OWUF_100HZ);
+	uint8_t cntl3 = (owuf << KX132_CNTL3_OBTS_SHIFT) | owuf;
+
+	ret = i2c_reg_write_byte_dt(&cfg->i2c, KX132_REG_CNTL3, cntl3);
+	if (ret < 0) {
+		return ret;
+	}
+	data->owuf_mhz = kx132_owuf_to_mhz(owuf);
+
+	/* CNTL4: WUF engine on, relative threshold — C_MODE/PR_MODE set by trigger_set */
+	ret = i2c_reg_write_byte_dt(&cfg->i2c, KX132_REG_CNTL4,
+				    KX132_CNTL4_TH_MODE | KX132_CNTL4_WUFE);
+	if (ret < 0) {
+		return ret;
+	}
+
+	/* INC2: all axes enabled for WUF, AOI=0 */
+	ret = i2c_reg_write_byte_dt(&cfg->i2c, KX132_REG_INC2, KX132_INC2_ALL_AXES);
+	if (ret < 0) {
+		return ret;
+	}
+
+	/* LP_CNTL1: AVC=000 (no averaging) */
+	ret = i2c_reg_update_byte_dt(&cfg->i2c, KX132_REG_LP_CNTL1,
+				     KX132_LP_CNTL1_AVC_MASK,
+				     KX132_LP_AVC_NO_AVG << KX132_LP_CNTL1_AVC_SHIFT);
+	if (ret < 0) {
+		return ret;
+	}
+
+	/* LP_CNTL2: LPSTPSEL=1 */
+	ret = i2c_reg_write_byte_dt(&cfg->i2c, KX132_REG_LP_CNTL2,
+				    KX132_LP_CNTL2_LPSTPSEL);
 	if (ret < 0) {
 		return ret;
 	}
@@ -348,8 +433,6 @@ static int kx132_power_up(const struct device *dev)
 	data->gain = kx132_range_to_gain(cfg->range);
 
 #ifdef CONFIG_KX132_TRIGGER
-	data->rms_avc = KX132_RMS_AVC_4;
-
 	ret = kx132_init_interrupt(dev);
 	if (ret < 0) {
 		LOG_ERR("Failed to init interrupts: %d", ret);
@@ -357,7 +440,7 @@ static int kx132_power_up(const struct device *dev)
 	}
 #endif
 
-	/* Enable sensor: PC1=1, low-power mode (RES=0), set range */
+	/* Enable sensor: PC1=1, low-power mode (RES=0, DRDYE=0), set range */
 	data->cntl1_val = KX132_CNTL1_PC1 |
 			  (kx132_range_to_gsel(cfg->range) << KX132_CNTL1_GSEL_SHIFT);
 
@@ -372,8 +455,8 @@ static int kx132_power_up(const struct device *dev)
 		return ret;
 	}
 
-	LOG_INF("KX132-1211 initialized (ODR=%u Hz, range=+/-%ug)",
-		cfg->odr, cfg->range);
+	LOG_INF("KX132-1211 initialized (sample-rate=%u Hz, range=+/-%ug)",
+		cfg->sample_rate, cfg->range);
 
 	return 0;
 }
@@ -427,14 +510,11 @@ static int kx132_init(const struct device *dev)
 	}
 
 	/* Software reset */
-	ret = i2c_reg_write_byte_dt(&cfg->i2c, KX132_REG_CNTL2, KX132_CNTL2_SRST);
+	ret = kx132_soft_reset(dev);
 	if (ret < 0) {
 		LOG_ERR("Failed to reset: %d", ret);
 		return ret;
 	}
-
-	/* Wait for reset to complete */
-	k_msleep(2);
 
 	return pm_device_driver_init(dev, kx132_pm_action);
 }
@@ -451,14 +531,14 @@ static DEVICE_API(sensor, kx132_driver_api) = {
 #define KX132_TRIGGER_CFG(inst)						\
 	IF_ENABLED(CONFIG_KX132_TRIGGER,				\
 		(.gpio_int = GPIO_DT_SPEC_INST_GET_OR(inst, irq_gpios, {0}), \
-		 .wakeup_threshold = DT_INST_PROP_OR(inst, wakeup_threshold, 112), \
-		 .wakeup_debounce = DT_INST_PROP_OR(inst, wakeup_debounce, 10),))
+		 .wakeup_threshold_mg  = DT_INST_PROP_OR(inst, wakeup_threshold, 450), \
+		 .wakeup_debounce_ms   = DT_INST_PROP_OR(inst, wakeup_debounce, 640),))
 
 #define KX132_DEFINE(inst)						\
 	static struct kx132_data kx132_data_##inst;			\
 	static const struct kx132_config kx132_config_##inst = {	\
 		.i2c = I2C_DT_SPEC_INST_GET(inst),			\
-		.odr = DT_INST_PROP_OR(inst, odr, 50),			\
+		.sample_rate = DT_INST_PROP_OR(inst, sample_rate, 50),	\
 		.range = DT_INST_PROP_OR(inst, range, 2),		\
 		KX132_TRIGGER_CFG(inst)					\
 	};								\
