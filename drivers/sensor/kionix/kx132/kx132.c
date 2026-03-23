@@ -96,6 +96,7 @@ static uint8_t kx132_odr_to_osa(uint16_t odr)
 
 static uint32_t kx132_owuf_to_mhz(uint8_t owuf)
 {
+	/* Indexed by OWUF register value (0–7); values in milli-Hz */
 	static const uint32_t table[] = {
 		781, 1563, 3125, 6250, 12500, 25000, 50000, 100000
 	};
@@ -103,6 +104,11 @@ static uint32_t kx132_owuf_to_mhz(uint8_t owuf)
 	return table[owuf & 0x07];
 }
 
+/*
+ * Map an ODR in Hz to the nearest OWUF register value (0–7).
+ * The OWUF register only encodes ODRs up to 100 Hz; callers that derive OWUF
+ * from the accel OSA must clamp with MIN(osa, KX132_OWUF_100HZ) themselves.
+ */
 static uint8_t kx132_odr_to_owuf(uint16_t odr)
 {
 	if (odr >= 100) {
@@ -194,6 +200,7 @@ int kx132_set_wufc(const struct device *dev, uint16_t ms)
 {
 	const struct kx132_config *cfg = dev->config;
 	struct kx132_data *data = dev->data;
+	/* counts = ms × OWUF_Hz / 1000  (owuf_mhz is in milli-Hz, so divide by 1 000 000) */
 	uint8_t counts = (uint8_t)((uint32_t)ms * data->owuf_mhz / 1000000UL);
 	int ret;
 
@@ -300,6 +307,10 @@ static int kx132_attr_set(const struct device *dev,
 		/* val->val1 in milliseconds */
 		return kx132_set_wufc(dev, (uint16_t)val->val1);
 	case SENSOR_ATTR_HYSTERESIS: {
+		/* Non-standard use: val->val1 is treated as an OWUF ODR in Hz,
+		 * allowing the WUF sampling rate to be tuned independently of the
+		 * main accel OSA without entering standby.
+		 */
 		uint8_t owuf = kx132_odr_to_owuf((uint16_t)val->val1);
 
 		ret = i2c_reg_update_byte_dt(&cfg->i2c, KX132_REG_CNTL3,
@@ -347,7 +358,10 @@ static int kx132_attr_set(const struct device *dev,
 			break;
 		}
 #ifdef CONFIG_KX132_TRIGGER
-		/* Keep OWUF in sync with the new ODR */
+		/* Keep OWUF in sync with the new ODR, clamped to 100 Hz.
+		 * The OWUF register only supports ODRs up to 100 Hz (0x07)
+		 * even when the main accel OSA is set higher.
+		 */
 		uint8_t owuf = MIN(osa, KX132_OWUF_100HZ);
 
 		ret = i2c_reg_update_byte_dt(&cfg->i2c, KX132_REG_CNTL3,
@@ -382,7 +396,11 @@ static int kx132_power_up(const struct device *dev)
 		return ret;
 	}
 
-	/* ODR + IIR bypass */
+	/* ODR and IIR bypass.
+	 * IIR_BYPASS=1 disables the built-in low-pass filter so the WUF engine
+	 * sees raw, undelayed samples.  The IIR filter adds group delay that would
+	 * distort threshold comparisons at low ODRs.
+	 */
 	uint8_t osa = kx132_odr_to_osa(cfg->sample_rate);
 
 	ret = i2c_reg_write_byte_dt(&cfg->i2c, KX132_REG_ODCNTL,
@@ -401,20 +419,30 @@ static int kx132_power_up(const struct device *dev)
 	}
 	data->owuf_mhz = kx132_owuf_to_mhz(owuf);
 
-	/* CNTL4: WUF engine on, relative threshold — C_MODE/PR_MODE set by trigger_set */
+	/* CNTL4: enable WUF engine with a relative threshold.
+	 * TH_MODE=1: the threshold is compared against the delta between the current
+	 * sample and the slowly-updated background level, not against absolute g.
+	 * C_MODE and PR_MODE are intentionally left 0 here; trigger_set adds them
+	 * when a motion handler is registered.
+	 */
 	ret = i2c_reg_write_byte_dt(&cfg->i2c, KX132_REG_CNTL4,
 				    KX132_CNTL4_TH_MODE | KX132_CNTL4_WUFE);
 	if (ret < 0) {
 		return ret;
 	}
 
-	/* INC2: all axes enabled for WUF, AOI=0 */
+	/* INC2: enable all six axis directions for WUF.
+	 * AOI=0 (OR logic): a threshold crossing on any enabled axis fires the interrupt.
+	 */
 	ret = i2c_reg_write_byte_dt(&cfg->i2c, KX132_REG_INC2, KX132_INC2_ALL_AXES);
 	if (ret < 0) {
 		return ret;
 	}
 
-	/* LP_CNTL1: AVC=000 (no averaging) */
+	/* LP_CNTL1: disable sub-sample averaging (AVC=000).
+	 * When IIR_BYPASS=1 the LP averaging path must also be disabled;
+	 * the two modes are mutually exclusive per the TRM.
+	 */
 	ret = i2c_reg_update_byte_dt(&cfg->i2c, KX132_REG_LP_CNTL1,
 				     KX132_LP_CNTL1_AVC_MASK,
 				     KX132_LP_AVC_NO_AVG << KX132_LP_CNTL1_AVC_SHIFT);
@@ -422,7 +450,10 @@ static int kx132_power_up(const struct device *dev)
 		return ret;
 	}
 
-	/* LP_CNTL2: LPSTPSEL=1 */
+	/* LP_CNTL2: LPSTPSEL=1 — halt sub-sample accumulation during the WUF
+	 * evaluation window so that stale accumulated samples cannot dilute the
+	 * threshold comparison.
+	 */
 	ret = i2c_reg_write_byte_dt(&cfg->i2c, KX132_REG_LP_CNTL2,
 				    KX132_LP_CNTL2_LPSTPSEL);
 	if (ret < 0) {
@@ -440,7 +471,10 @@ static int kx132_power_up(const struct device *dev)
 	}
 #endif
 
-	/* Enable sensor: PC1=1, low-power mode (RES=0, DRDYE=0), set range */
+	/* Enable sensor: PC1=1 (operating mode), RES=0 (low-power), range from DT.
+	 * DRDYE=0: data-ready is not routed via CNTL1; when the trigger API is used
+	 * the DRDY interrupt is routed through INC4 → INT1 instead.
+	 */
 	data->cntl1_val = KX132_CNTL1_PC1 |
 			  (kx132_range_to_gsel(cfg->range) << KX132_CNTL1_GSEL_SHIFT);
 

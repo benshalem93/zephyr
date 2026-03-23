@@ -45,8 +45,9 @@ static void kx132_handle_interrupt(const struct device *dev)
 	/* Read INT_REL to clear latched interrupts and release INT pin */
 	i2c_reg_read_byte_dt(&cfg->i2c, KX132_REG_INT_REL, &dummy);
 
-	/* Re-arm WUF state machine so it can trigger again on the next event.
-	 * ADP is disabled; MAN_SLEEP alone is sufficient to re-arm.
+	/* Re-arm WUF state machine: writing MAN_SLEEP transitions it from the
+	 * wake state back to the sleep state so it can detect the next event.
+	 * ADP is disabled, so MAN_SLEEP alone is sufficient.
 	 */
 	if (ins3 & KX132_INS3_WUFS) {
 		i2c_reg_write_byte_dt(&cfg->i2c, KX132_REG_CNTL5,
@@ -66,7 +67,7 @@ static void kx132_gpio_callback(const struct device *port,
 	ARG_UNUSED(port);
 	ARG_UNUSED(pins);
 
-	/* Disable GPIO interrupt until handled */
+	/* Disable GPIO interrupt while servicing to prevent re-entry */
 	gpio_pin_interrupt_configure_dt(&cfg->gpio_int, GPIO_INT_DISABLE);
 
 #ifdef CONFIG_KX132_TRIGGER_OWN_THREAD
@@ -131,7 +132,15 @@ int kx132_trigger_set(const struct device *dev,
 				return ret;
 			}
 
-			/* Full WUF algorithm config: C_MODE=1, PR_MODE=1 added here */
+			/* Complete CNTL4 configuration for active motion detection:
+			 *   C_MODE=1:   debounce counter decrements when below threshold
+			 *               (C_MODE=0 would reset it to zero on any sub-threshold sample)
+			 *   TH_MODE=1:  relative threshold — delta from background, not absolute g
+			 *   WUFE=1:     wake-up function enabled
+			 *   PR_MODE=1:  pulse reject — brief transients that momentarily exceed
+			 *               the threshold are ignored; the threshold must be exceeded
+			 *               continuously for the full WUFC debounce period to fire
+			 */
 			ret = i2c_reg_write_byte_dt(&cfg->i2c, KX132_REG_CNTL4,
 						    KX132_CNTL4_C_MODE  |
 						    KX132_CNTL4_TH_MODE |
