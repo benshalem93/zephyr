@@ -254,13 +254,7 @@ struct kx132_data {
 	sensor_trigger_handler_t drdy_handler;
 	const struct sensor_trigger *drdy_trig;
 
-#ifdef CONFIG_KX132_TRIGGER_OWN_THREAD
-	K_KERNEL_STACK_MEMBER(thread_stack, CONFIG_KX132_THREAD_STACK_SIZE);
-	struct k_thread thread;
-	struct k_sem gpio_sem;
-#elif defined(CONFIG_KX132_TRIGGER_GLOBAL_THREAD)
 	struct k_work work;
-#endif
 #endif /* CONFIG_KX132_TRIGGER */
 };
 

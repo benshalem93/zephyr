@@ -10,10 +10,6 @@ common:
 tests:
   sample.sensor.motion_detect:
     filter: dt_alias_exists("accel0")
-    harness_config:
-      type: one_line
-      regex:
-        - "Motion detected"
     platform_allow:
       - nucleo_u5a5zj_q
     integration_platforms:

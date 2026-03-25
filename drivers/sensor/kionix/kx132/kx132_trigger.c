@@ -70,34 +70,15 @@ static void kx132_gpio_callback(const struct device *port,
 	/* Disable GPIO interrupt while servicing to prevent re-entry */
 	gpio_pin_interrupt_configure_dt(&cfg->gpio_int, GPIO_INT_DISABLE);
 
-#ifdef CONFIG_KX132_TRIGGER_OWN_THREAD
-	k_sem_give(&data->gpio_sem);
-#elif defined(CONFIG_KX132_TRIGGER_GLOBAL_THREAD)
 	k_work_submit(&data->work);
-#endif
 }
 
-#ifdef CONFIG_KX132_TRIGGER_OWN_THREAD
-static void kx132_thread(void *p1, void *p2, void *p3)
-{
-	ARG_UNUSED(p2);
-	ARG_UNUSED(p3);
-
-	struct kx132_data *data = p1;
-
-	while (1) {
-		k_sem_take(&data->gpio_sem, K_FOREVER);
-		kx132_handle_interrupt(data->dev);
-	}
-}
-#elif defined(CONFIG_KX132_TRIGGER_GLOBAL_THREAD)
 static void kx132_work_cb(struct k_work *work)
 {
 	struct kx132_data *data = CONTAINER_OF(work, struct kx132_data, work);
 
 	kx132_handle_interrupt(data->dev);
 }
-#endif
 
 int kx132_trigger_set(const struct device *dev,
 		      const struct sensor_trigger *trig,
@@ -250,16 +231,7 @@ int kx132_init_interrupt(const struct device *dev)
 		return ret;
 	}
 
-#ifdef CONFIG_KX132_TRIGGER_OWN_THREAD
-	k_sem_init(&data->gpio_sem, 0, K_SEM_MAX_LIMIT);
-	k_thread_create(&data->thread, data->thread_stack,
-			CONFIG_KX132_THREAD_STACK_SIZE,
-			kx132_thread, data, NULL, NULL,
-			K_PRIO_COOP(CONFIG_KX132_THREAD_PRIORITY),
-			0, K_NO_WAIT);
-#elif defined(CONFIG_KX132_TRIGGER_GLOBAL_THREAD)
 	k_work_init(&data->work, kx132_work_cb);
-#endif
 
 	/* Configure INT1 pin: enabled, active high, latched until INT_REL read */
 	uint8_t inc1 = KX132_INC1_IEN1 | KX132_INC1_IEA1 | KX132_INC1_IEL1;
