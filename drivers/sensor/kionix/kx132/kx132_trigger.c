@@ -1,0 +1,253 @@
+/*
+ * Copyright (c) 2024 STMicroelectronics
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#define DT_DRV_COMPAT kionix_kx132
+
+#include <zephyr/drivers/i2c.h>
+#include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/sensor.h>
+#include <zephyr/logging/log.h>
+
+#include "kx132.h"
+
+LOG_MODULE_DECLARE(kx132, CONFIG_SENSOR_LOG_LEVEL);
+
+static void kx132_handle_interrupt(const struct device *dev)
+{
+	const struct kx132_config *cfg = dev->config;
+	struct kx132_data *data = dev->data;
+	uint8_t ins2 = 0;
+	uint8_t ins3 = 0;
+	uint8_t dummy;
+
+	/* Read interrupt source registers */
+	if (i2c_reg_read_byte_dt(&cfg->i2c, KX132_REG_INS2, &ins2) < 0) {
+		LOG_ERR("Failed to read INS2");
+	}
+
+	if (i2c_reg_read_byte_dt(&cfg->i2c, KX132_REG_INS3, &ins3) < 0) {
+		LOG_ERR("Failed to read INS3");
+	}
+
+	/* Handle wake-up (motion) interrupt */
+	if ((ins3 & KX132_INS3_WUFS) && data->motion_handler) {
+		data->motion_handler(dev, data->motion_trig);
+	}
+
+	/* Handle data ready interrupt */
+	if ((ins2 & KX132_INS2_DRDY) && data->drdy_handler) {
+		data->drdy_handler(dev, data->drdy_trig);
+	}
+
+	/* Read INT_REL to clear latched interrupts and release INT pin */
+	i2c_reg_read_byte_dt(&cfg->i2c, KX132_REG_INT_REL, &dummy);
+
+	/* Re-arm WUF state machine: writing MAN_SLEEP transitions it from the
+	 * wake state back to the sleep state so it can detect the next event.
+	 * ADP is disabled, so MAN_SLEEP alone is sufficient.
+	 */
+	if (ins3 & KX132_INS3_WUFS) {
+		i2c_reg_write_byte_dt(&cfg->i2c, KX132_REG_CNTL5,
+				      KX132_CNTL5_MAN_SLEEP);
+	}
+
+	/* Re-enable GPIO interrupt */
+	gpio_pin_interrupt_configure_dt(&cfg->gpio_int, GPIO_INT_EDGE_TO_ACTIVE);
+}
+
+static void kx132_gpio_callback(const struct device *port,
+				struct gpio_callback *cb, uint32_t pins)
+{
+	struct kx132_data *data = CONTAINER_OF(cb, struct kx132_data, gpio_cb);
+	const struct kx132_config *cfg = data->dev->config;
+
+	ARG_UNUSED(port);
+	ARG_UNUSED(pins);
+
+	/* Disable GPIO interrupt while servicing to prevent re-entry */
+	gpio_pin_interrupt_configure_dt(&cfg->gpio_int, GPIO_INT_DISABLE);
+
+	k_work_submit(&data->work);
+}
+
+static void kx132_work_cb(struct k_work *work)
+{
+	struct kx132_data *data = CONTAINER_OF(work, struct kx132_data, work);
+
+	kx132_handle_interrupt(data->dev);
+}
+
+int kx132_trigger_set(const struct device *dev,
+		      const struct sensor_trigger *trig,
+		      sensor_trigger_handler_t handler)
+{
+	const struct kx132_config *cfg = dev->config;
+	struct kx132_data *data = dev->data;
+	uint8_t inc4;
+	int ret;
+
+	if (!cfg->gpio_int.port) {
+		return -ENOTSUP;
+	}
+
+	/* Read current INC4 value */
+	ret = i2c_reg_read_byte_dt(&cfg->i2c, KX132_REG_INC4, &inc4);
+	if (ret < 0) {
+		return ret;
+	}
+
+	switch (trig->type) {
+	case SENSOR_TRIG_MOTION:
+		data->motion_handler = handler;
+		data->motion_trig = trig;
+
+		if (handler) {
+			/* --- Arm WUF engine --- */
+
+			/* Enter standby: CNTL4 requires PC1=0 to latch */
+			ret = kx132_set_standby(dev, true);
+			if (ret < 0) {
+				return ret;
+			}
+
+			/* Complete CNTL4 configuration for active motion detection:
+			 *   C_MODE=1:   debounce counter decrements when below threshold
+			 *               (C_MODE=0 would reset it to zero on any sub-threshold sample)
+			 *   TH_MODE=1:  relative threshold — delta from background, not absolute g
+			 *   WUFE=1:     wake-up function enabled
+			 *   PR_MODE=1:  pulse reject — brief transients that momentarily exceed
+			 *               the threshold are ignored; the threshold must be exceeded
+			 *               continuously for the full WUFC debounce period to fire
+			 */
+			ret = i2c_reg_write_byte_dt(&cfg->i2c, KX132_REG_CNTL4,
+						    KX132_CNTL4_C_MODE  |
+						    KX132_CNTL4_TH_MODE |
+						    KX132_CNTL4_WUFE    |
+						    KX132_CNTL4_PR_MODE);
+			if (ret < 0) {
+				kx132_set_standby(dev, false);
+				return ret;
+			}
+
+			ret = kx132_set_standby(dev, false);
+			if (ret < 0) {
+				return ret;
+			}
+
+			ret = kx132_set_wufth(dev, cfg->wakeup_threshold_mg);
+			if (ret < 0) {
+				return ret;
+			}
+
+			ret = kx132_set_wufc(dev, cfg->wakeup_debounce_ms);
+			if (ret < 0) {
+				return ret;
+			}
+
+			/* Arm WUF state machine (ADP disabled — raw accel feeds WUF) */
+			ret = i2c_reg_write_byte_dt(&cfg->i2c, KX132_REG_CNTL5,
+						    KX132_CNTL5_MAN_SLEEP);
+			if (ret < 0) {
+				return ret;
+			}
+
+			inc4 |= KX132_INC4_WUFI1;
+		} else {
+			/* --- Disarm WUF engine --- */
+
+			ret = kx132_set_standby(dev, true);
+			if (ret < 0) {
+				return ret;
+			}
+
+			/* Clear C_MODE, PR_MODE, WUFE — leave TH_MODE as-is */
+			ret = i2c_reg_update_byte_dt(&cfg->i2c, KX132_REG_CNTL4,
+						     KX132_CNTL4_C_MODE  |
+						     KX132_CNTL4_WUFE    |
+						     KX132_CNTL4_PR_MODE, 0);
+			if (ret < 0) {
+				kx132_set_standby(dev, false);
+				return ret;
+			}
+
+			ret = kx132_set_standby(dev, false);
+			if (ret < 0) {
+				return ret;
+			}
+
+			inc4 &= ~KX132_INC4_WUFI1;
+		}
+		break;
+
+	case SENSOR_TRIG_DATA_READY:
+		data->drdy_handler = handler;
+		data->drdy_trig = trig;
+		if (handler) {
+			inc4 |= KX132_INC4_DRDYI1;
+		} else {
+			inc4 &= ~KX132_INC4_DRDYI1;
+		}
+		break;
+	default:
+		return -ENOTSUP;
+	}
+
+	return i2c_reg_write_byte_dt(&cfg->i2c, KX132_REG_INC4, inc4);
+}
+
+int kx132_init_interrupt(const struct device *dev)
+{
+	const struct kx132_config *cfg = dev->config;
+	struct kx132_data *data = dev->data;
+	int ret;
+
+	if (!cfg->gpio_int.port) {
+		LOG_INF("No interrupt GPIO configured");
+		return 0;
+	}
+
+	if (!gpio_is_ready_dt(&cfg->gpio_int)) {
+		LOG_ERR("GPIO device not ready");
+		return -ENODEV;
+	}
+
+	data->dev = dev;
+
+	ret = gpio_pin_configure_dt(&cfg->gpio_int, GPIO_INPUT);
+	if (ret < 0) {
+		LOG_ERR("Failed to configure GPIO: %d", ret);
+		return ret;
+	}
+
+	gpio_init_callback(&data->gpio_cb, kx132_gpio_callback,
+			   BIT(cfg->gpio_int.pin));
+
+	ret = gpio_add_callback(cfg->gpio_int.port, &data->gpio_cb);
+	if (ret < 0) {
+		LOG_ERR("Failed to add GPIO callback: %d", ret);
+		return ret;
+	}
+
+	k_work_init(&data->work, kx132_work_cb);
+
+	/* Configure INT1 pin: enabled, active high, latched until INT_REL read */
+	uint8_t inc1 = KX132_INC1_IEN1 | KX132_INC1_IEA1 | KX132_INC1_IEL1;
+
+	ret = i2c_reg_write_byte_dt(&cfg->i2c, KX132_REG_INC1, inc1);
+	if (ret < 0) {
+		return ret;
+	}
+
+	/* Enable GPIO interrupt */
+	ret = gpio_pin_interrupt_configure_dt(&cfg->gpio_int,
+					      GPIO_INT_EDGE_TO_ACTIVE);
+	if (ret < 0) {
+		LOG_ERR("Failed to configure GPIO interrupt: %d", ret);
+		return ret;
+	}
+
+	return 0;
+}

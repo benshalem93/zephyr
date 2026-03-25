@@ -1,0 +1,62 @@
+# Copyright (c) 2024 STMicroelectronics
+# SPDX-License-Identifier: Apache-2.0
+
+description: |
+  Kionix KX132-1211 tri-axis accelerometer connected via I2C bus.
+
+compatible: "kionix,kx132"
+
+include: [sensor-device.yaml, i2c-device.yaml]
+
+properties:
+  irq-gpios:
+    type: phandle-array
+    description: |
+      INT1 interrupt GPIO pin. This pin signals motion wake-up
+      and data-ready events.
+
+  sample-rate:
+    type: int
+    required: true
+    enum:
+      - 0    # 0.781 Hz
+      - 1    # 1.563 Hz
+      - 3    # 3.125 Hz
+      - 6    # 6.25 Hz
+      - 12   # 12.5 Hz
+      - 25
+      - 50
+      - 100
+      - 200
+      - 400
+      - 800
+      - 1600
+    description: |
+      Accelerometer output data rate in Hz. Only the listed values are
+      supported by the hardware. The OWUF debounce clock is derived from
+      this rate (clamped to 100 Hz max).
+
+  range:
+    type: int
+    required: true
+    enum:
+      - 2
+      - 4
+      - 8
+      - 16
+    description: |
+      Full-scale measurement range in g.
+
+  wakeup-threshold:
+    type: int
+    default: 450
+    description: |
+      Wake-up detection threshold in milli-g (1 mg = g/1000 = 9.80665e-3 m/s²).
+      The driver converts this value to 11-bit WUFTH counts internally.
+
+  wakeup-debounce:
+    type: int
+    default: 640
+    description: |
+      Wake-up debounce window in milliseconds.
+      The driver converts this to WUFC counts using the active OWUF and ODR.

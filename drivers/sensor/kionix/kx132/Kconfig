@@ -1,0 +1,24 @@
+# Kionix KX132-1211 3-axis accelerometer driver
+
+# Copyright (c) 2024 STMicroelectronics
+# SPDX-License-Identifier: Apache-2.0
+
+menuconfig KX132
+	bool "KX132-1211 I2C accelerometer sensor driver"
+	default n
+	depends on DT_HAS_KIONIX_KX132_ENABLED
+	select I2C
+	help
+	  Enable driver for Kionix KX132-1211 tri-axis accelerometer.
+
+if KX132
+
+config KX132_TRIGGER
+	bool "Enable interrupt/trigger support"
+	default n
+	depends on GPIO
+	depends on $(dt_compat_any_has_prop,$(DT_COMPAT_KIONIX_KX132),irq-gpios)
+	help
+	  Enable interrupt-driven trigger support using the system work queue.
+
+endif # KX132
